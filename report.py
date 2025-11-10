@@ -1,31 +1,12 @@
 import re
 from collections import Counter, defaultdict
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urldefrag
 from threading import RLock
 from utils import get_logger
+from stopword import load_stopwords
 
-# Standard English stopwords list.
-STOPWORDS = {
-    "a","about","above","after","again","against","all","am","an","and","any",
-    "are","aren't","as","at","be","because","been","before","being","below",
-    "between","both","but","by","can't","cannot","could","couldn't","did",
-    "didn't","do","does","doesn't","doing","don't","down","during","each",
-    "few","for","from","further","had","hadn't","has","hasn't","have",
-    "haven't","having","he","he'd","he'll","he's","her","here","here's",
-    "hers","herself","him","himself","his","how","how's","i","i'd","i'll",
-    "i'm","i've","if","in","into","is","isn't","it","it's","its","itself",
-    "let's","me","more","most","mustn't","my","myself","no","nor","not","of",
-    "off","on","once","only","or","other","ought","our","ours","ourselves",
-    "out","over","own","same","shan't","she","she'd","she'll","she's",
-    "should","shouldn't","so","some","such","than","that","that's","the",
-    "their","theirs","them","themselves","then","there","there's","these",
-    "they","they'd","they'll","they're","they've","this","those","through",
-    "to","too","under","until","up","very","was","wasn't","we","we'd","we'll",
-    "we're","we've","were","weren't","what","what's","when","when's","where",
-    "where's","which","while","who","who's","whom","why","why's","with",
-    "won't","would","wouldn't","you","you'd","you'll","you're","you've",
-    "your","yours","yourself","yourselves"
-}
+# Standard English stopwords list
+STOPWORDS = load_stopwords("stopwords.txt")
 
 
 class Report:
@@ -66,12 +47,20 @@ class Report:
         Call this once per successfully scraped page.
         Thread-safe: multiple workers can call this concurrently.
         
-        - url: final URL (normalized)
+        - url: final URL (should be normalized, but we ensure fragment removal)
         - text_or_words: either raw text string OR list of pre-tokenized words
+        
+        NOTE: Per assignment requirements, uniqueness is determined by URL
+        WITHOUT fragment (e.g., http://example.com#a and http://example.com#b
+        are considered the same page).
         """
         with self._lock:
-            # Track unique URLs
-            self._unique_urls.add(url)
+            # Ensure fragment is removed (defensive programming)
+            # Even though scraper should normalize, we guarantee it here
+            url_no_fragment, _ = urldefrag(url)
+            
+            # Track unique URLs (without fragments)
+            self._unique_urls.add(url_no_fragment)
 
             # Handle both string and list inputs
             if isinstance(text_or_words, list):
@@ -87,18 +76,57 @@ class Report:
             # Check if this is the longest page
             if word_count > self._longest_page_wordcount:
                 self._longest_page_wordcount = word_count
-                self._longest_page_url = url
+                self._longest_page_url = url_no_fragment
 
-            # Count global word frequencies
-            self._word_counter.update(words)
+            # Count global word frequencies (with filtering)
+            valid_words = [w for w in words if self._is_valid_word(w)]
+
+            # Per-page word frequency limiting
+            from collections import Counter
+            word_freq_this_page = Counter(valid_words)
+
+            MAX_WORD_COUNT_PER_PAGE = 50
+
+            for word, count in word_freq_this_page.items():
+                capped_count = min(count, MAX_WORD_COUNT_PER_PAGE)
+                self._word_counter[word] += capped_count
 
             # Check subdomain stats for uci.edu
-            self._track_uci_subdomain(url)
+            self._track_uci_subdomain(url_no_fragment)
+
+
 
     def _tokenize(self, text: str):
         """Tokenizes text, removes stopwords, returns lowercase words."""
         tokens = re.findall(r"[a-zA-Z]+", text.lower())
         return [t for t in tokens if t not in STOPWORDS]
+    
+    def _is_valid_word(self, word: str) -> bool:
+        """
+        Check if a word is valid for reporting.
+        Filters out garbage tokens, repetitive characters, etc.
+        """
+        # Skip if too long
+        if len(word) > 20:
+            return False
+        
+        # Skip repetitive character patterns (ccc, aaaa, bbbb, abab)
+        # Check if word has very low character diversity
+        unique_chars = len(set(word))
+        word_length = len(word)
+        
+        # If 3+ chars and only 1-2 unique characters, it's likely garbage
+        if word_length >= 3 and unique_chars <= 2:
+            return False
+        
+        # Check for alternating patterns (abababab)
+        if word_length >= 6:
+            # Check if first half equals second half (repeated pattern)
+            half = word_length // 2
+            if word[:half] == word[half:2*half]:
+                return False
+        
+        return True
 
     def _track_uci_subdomain(self, url: str):
         """Counts subdomain if domain ends with 'uci.edu'."""
@@ -117,7 +145,10 @@ class Report:
     # ---- Final Output Methods ----
 
     def get_unique_page_count(self):
-        """Thread-safe getter for unique page count."""
+        """
+        Thread-safe getter for unique page count.
+        Returns count of unique URLs (fragments ignored per assignment).
+        """
         with self._lock:
             return len(self._unique_urls)
 
@@ -127,7 +158,10 @@ class Report:
             return self._longest_page_url, self._longest_page_wordcount
 
     def get_top_50_words(self):
-        """Thread-safe getter for top 50 words."""
+        """
+        Thread-safe getter for top 50 words.
+        Returns list of (word, count) tuples.
+        """
         with self._lock:
             return self._word_counter.most_common(50)
 
@@ -150,6 +184,7 @@ class Report:
             self._log.info("=" * 70)
             
             self._log.info(f"Total unique pages: {len(self._unique_urls)}")
+            self._log.info(f"  (Uniqueness determined by URL without fragment)")
             self._log.info(f"Longest page: {self._longest_page_url} "
                           f"({self._longest_page_wordcount} words)")
 
@@ -159,6 +194,6 @@ class Report:
 
             self._log.info("\nUCI subdomains:")
             for sub, count in sorted(self._uci_subdomains.items(), key=lambda x: x[0]):
-                self._log.info(f"  {sub}: {count}")
+                self._log.info(f"  {sub}.uci.edu: {count} pages")
             
             self._log.info("=" * 70)
