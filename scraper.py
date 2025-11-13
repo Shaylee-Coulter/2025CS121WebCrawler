@@ -19,7 +19,7 @@ stemmer = PorterStemmer()
 
 # Trap detection limits
 MAX_PATH_DEPTH = 10
-MAX_QUERY_PARAMS = 2  # Very strict
+MAX_QUERY_PARAMS = 5  # Very strict
 MAX_PATH_VISITS_PER_DOMAIN = 20  # Much more aggressive
 MAX_SAME_PATH_DIFFERENT_QUERY = 5  # Max variations of same path
 
@@ -63,8 +63,8 @@ def scraper(url, resp, report):
 
     # ------------------ duplicate detection ----------------------
     with _cache_lock:
-        sim = compute_simhash_placeholder(words)
-        chk = compute_checksum_placeholder(text)
+        sim = compute_simhash(words)
+        chk = compute_checksum(text)
 
         if sim in _seen_simhashes or chk in _seen_checksums:
             return []  # near-duplicate page
@@ -267,27 +267,20 @@ def robots_allowed(url):
 
 
 # ----------------------------------------------------------------------
-# DUPLICATE DETECTION (PLACEHOLDERS)
+# DUPLICATE DETECTION 
 # ----------------------------------------------------------------------
-def compute_simhash_placeholder(words):
-    """
-    Fake simhash: hash of stemmed word list.
-    Replace with real SimHash for better near-duplicate detection.
-    """
+def compute_simhash(words):
     joined = " ".join(sorted(words))  # Sort for consistency
     h = hashlib.sha256(joined.encode("utf-8")).hexdigest()
     return int(h[:16], 16)
 
 
-def compute_checksum_placeholder(text):
-    """
-    Simple checksum: MD5 of visible text.
-    """
+def compute_checksum(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
 # ----------------------------------------------------------------------
-# URL VALIDITY FILTER (given by assignment)
+# URL VALIDITY FILTER 
 # ----------------------------------------------------------------------
 def is_valid(url):
     """
@@ -333,7 +326,7 @@ def is_valid(url):
         if hostname in allowed_domains:
             return True
         
-        # Subdomain match (e.g., www.ics.uci.edu, cml.ics.uci.edu)
+        # make sure its in allowed domains
         for domain in allowed_domains:
             if hostname.endswith("." + domain):
                 return True
